@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pixelate</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Transitions and other polish */
+        #tool-options-panels { transition: all 0.3s ease-in-out; }
+        .tool-btn { transition: background-color 0.2s ease-in-out; }
+        .aspect-ratio-btn, #cancel-crop, #apply-crop { transition: background-color 0.2s ease-in-out; }
+
+        input[type="range"]{ -webkit-appearance: none; appearance: none; width: 100%; height: 8px; background: #4a5568; border-radius: 5px; outline: none; transition: background-color 0.2s; }
+        input[type="range"]:hover { background: #718096; }
+        input[type="range"]::-webkit-slider-thumb{ -webkit-appearance: none; appearance: none; width: 20px; height: 20px; background: #4299e1; border-radius: 50%; cursor: pointer; }
+        input[type="range"]::-moz-range-thumb{ width: 20px; height: 20px; background: #4299e1; border-radius: 50%; cursor: pointer; }
+
+        .filter-previews::-webkit-scrollbar{ height: 8px; }
+        .filter-previews::-webkit-scrollbar-track{ background: #2d3748; }
+        .filter-previews::-webkit-scrollbar-thumb{ background: #4a5568; border-radius: 4px; }
+
+        #crop-box { position: absolute; border: 2px dashed rgba(255, 255, 255, 0.9); box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.6); cursor: move; }
+        .handle { position: absolute; width: 12px; height: 12px; background-color: rgba(255, 255, 255, 0.9); border: 1px solid #000; }
+        .handle.nw { top: -6px; left: -6px; cursor: nwse-resize; } .handle.ne { top: -6px; right: -6px; cursor: nesw-resize; }
+        .handle.sw { bottom: -6px; left: -6px; cursor: nesw-resize; } .handle.se { bottom: -6px; right: -6px; cursor: nwse-resize; }
+    </style>
+</head>
+<body class="bg-gray-900 text-white flex flex-col h-screen select-none">
+
+    <!-- Header -->
+    <header class="bg-gray-800 p-2 sm:p-4 flex justify-between items-center shadow-md z-20">
+        <h1 class="text-xl sm:text-2xl font-bold">Pixelate</h1>
+        <div>
+            <button id="open-btn" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-3 sm:px-4 rounded text-sm sm:text-base">Open</button>
+            <input type="file" id="file-input" class="hidden" accept="image/*">
+            <button id="export-btn" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-3 sm:px-4 rounded text-sm sm:text-base" disabled>Export</button>
+        </div>
+    </header>
+
+    <!-- Viewport -->
+    <main id="viewport" class="flex-grow flex items-center justify-center relative overflow-hidden p-2 sm:p-4">
+        <div id="initial-message" class="text-center text-gray-500">
+            <svg xmlns="http://www.w3.org/2000/svg" class="mx-auto h-16 w-16" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
+            <p class="mt-2">Please open an image to start editing.</p>
+        </div>
+        <canvas id="canvas" class="hidden max-w-full max-h-full rounded-lg shadow-lg"></canvas>
+        <div id="crop-box" class="hidden z-10">
+            <div class="handle nw" data-handle="nw"></div><div class="handle ne" data-handle="ne"></div>
+            <div class="handle sw" data-handle="sw"></div><div class="handle se" data-handle="se"></div>
+        </div>
+    </main>
+
+    <!-- Toolbar -->
+    <footer id="bottom-toolbar" class="bg-gray-800 shadow-md z-20">
+        <div id="tool-options-panels" class="hidden"></div>
+        <div id="main-tools" class="flex justify-center items-center space-x-2 sm:space-x-4 p-2">
+            <!-- Tool buttons are added here by JS -->
+        </div>
+    </footer>
+
+    <script>
+    document.addEventListener('DOMContentLoaded', () => {
+        const elements = {
+            openBtn: document.getElementById('open-btn'), fileInput: document.getElementById('file-input'),
+            exportBtn: document.getElementById('export-btn'), initialMessage: document.getElementById('initial-message'),
+            viewport: document.getElementById('viewport'), canvas: document.getElementById('canvas'),
+            ctx: document.getElementById('canvas').getContext('2d'), toolOptionsContainer: document.getElementById('tool-options-panels'),
+            mainToolsContainer: document.getElementById('main-tools'), cropBoxEl: document.getElementById('crop-box'),
+        };
+
+        const state = {
+            originalImage: null, currentImage: null, activeTool: null, activeFilter: 'none',
+            adjustments: { brightness: 100, contrast: 100, saturation: 100 },
+            transform: { rotation: 0, flipH: 1, flipV: 1 },
+            crop: { x: 0, y: 0, width: 0, height: 0, active: false, resizing: false, handle: null, startX: 0, startY: 0, startWidth: 0, startHeight: 0, startBoxX: 0, startBoxY: 0, aspectRatio: 0 },
+        };
+
+        const tools = [
+            { name: 'crop', icon: `<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7.629 18.371L18.37 7.63m-10.742 0L18.37 18.371M5 12H3m18 0h-2M12 5V3m0 18v-2"/></svg>` },
+            { name: 'filter', icon: `<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>` },
+            { name: 'adjust', icon: `<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 16v-2m8-6h2M4 12H2m16.66-4.66l1.42-1.42M5.76 18.24l-1.42 1.42M18.24 5.76l1.42 1.42M5.76 5.76l-1.42-1.42M12 18a6 6 0 100-12 6 6 0 000 12z"/></svg>` },
+            { name: 'transform', icon: `<svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>` },
+        ];
+
+        const filters = {
+            none: { name: 'None', css: '' },
+            grayscale: { name: 'Grayscale', css: 'grayscale(100%)' },
+            sepia: { name: 'Sepia', css: 'sepia(100%)' },
+            invert: { name: 'Invert', css: 'invert(100%)' },
+            vintage: { name: 'Vintage', css: 'sepia(60%) contrast(90%) brightness(90%)' },
+            clarity: { name: 'Clarity', css: 'contrast(125%)' },
+        };
+
+        function init() {
+            elements.openBtn.addEventListener('click', () => elements.fileInput.click());
+            elements.fileInput.addEventListener('change', loadImage);
+            elements.exportBtn.addEventListener('click', exportImage);
+            window.addEventListener('resize', () => {
+                displayImage();
+                if (state.activeTool === 'crop') {
+                    hideCropBox();
+                    showCropBox();
+                }
+            });
+            renderTools();
+        }
+
+        function renderTools() {
+            elements.mainToolsContainer.innerHTML = tools.map(t => `
+                <button class="tool-btn p-2 rounded-md disabled:opacity-50" data-tool="${t.name}" disabled title="${t.name.charAt(0).toUpperCase() + t.name.slice(1)}">
+                    ${t.icon}
+                </button>
+            `).join('');
+            document.querySelectorAll('.tool-btn').forEach(btn => btn.addEventListener('click', toggleTool));
+        }
+
+        function loadImage(e) {
+            const file = e.target.files[0];
+            if (!file || !file.type.startsWith('image/')) return;
+            const reader = new FileReader();
+            reader.onload = event => {
+                const img = new Image();
+                img.onload = () => {
+                    state.originalImage = img;
+                    state.currentImage = img;
+                    resetAllState();
+                    displayImage();
+                    enableUI(true);
+                };
+                img.src = event.target.result;
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function resetAllState() {
+            state.adjustments = { brightness: 100, contrast: 100, saturation: 100 };
+            state.transform = { rotation: 0, flipH: 1, flipV: 1 };
+            state.activeFilter = 'none';
+        }
+
+        function displayImage() {
+            if (!state.currentImage) return;
+            elements.initialMessage.classList.add('hidden');
+            elements.canvas.classList.remove('hidden');
+
+            const { rotation } = state.transform;
+            const rotated = rotation % 180 !== 0;
+            const imgWidth = rotated ? state.currentImage.height : state.currentImage.width;
+            const imgHeight = rotated ? state.currentImage.width : state.currentImage.height;
+
+            const viewportRect = elements.viewport.getBoundingClientRect();
+            const scale = Math.min((viewportRect.width - 32) / imgWidth, (viewportRect.height - 32) / imgHeight);
+
+            elements.canvas.width = imgWidth * scale;
+            elements.canvas.height = imgHeight * scale;
+
+            const { ctx } = elements;
+            ctx.save();
+            ctx.translate(elements.canvas.width / 2, elements.canvas.height / 2);
+            ctx.rotate(rotation * Math.PI / 180);
+            ctx.scale(state.transform.flipH, state.transform.flipV);
+            ctx.drawImage(state.currentImage, -(state.currentImage.width * scale) / 2, -(state.currentImage.height * scale) / 2, state.currentImage.width * scale, state.currentImage.height * scale);
+            ctx.restore();
+
+            applyCanvasStyles();
+        }
+
+        function applyCanvasStyles() {
+            const { brightness, contrast, saturation } = state.adjustments;
+            const filterString = `brightness(${brightness}%) contrast(${contrast}%) saturate(${saturation}%) ${getFilterCSS(state.activeFilter)}`.trim();
+            elements.canvas.style.filter = filterString;
+        }
+
+        function enableUI(enabled) {
+            document.querySelectorAll('.tool-btn').forEach(btn => btn.disabled = !enabled);
+            elements.exportBtn.disabled = !enabled;
+        }
+
+        function toggleTool(e) {
+            const tool = e.currentTarget.dataset.tool;
+            const isSameTool = state.activeTool === tool;
+
+            if (state.activeTool && !isSameTool) {
+                hideToolOptions(true);
+            }
+
+            if (isSameTool) {
+                state.activeTool = null;
+                hideToolOptions();
+            } else {
+                state.activeTool = tool;
+                showToolOptions(tool);
+            }
+            document.querySelectorAll('.tool-btn').forEach(b => b.classList.toggle('bg-blue-600', b.dataset.tool === state.activeTool));
+        }
+
+        function hideToolOptions(instant = false) {
+            if (state.activeTool === 'crop') hideCropBox();
+            const container = elements.toolOptionsContainer;
+            if (instant) {
+                container.classList.add('hidden');
+                container.innerHTML = '';
+                return;
+            }
+            container.style.height = container.scrollHeight + 'px';
+            requestAnimationFrame(() => {
+                container.style.height = '0px';
+                container.style.paddingTop = '0px';
+                container.style.paddingBottom = '0px';
+            });
+            setTimeout(() => {
+                container.classList.add('hidden');
+                container.innerHTML = '';
+                container.style.height = '';
+                container.style.paddingTop = '';
+                container.style.paddingBottom = '';
+            }, 300);
+        }
+
+        function showToolOptions(tool) {
+            const container = elements.toolOptionsContainer;
+            let optionsHTML = '';
+            switch (tool) {
+                case 'adjust': optionsHTML = getAdjustmentsHTML(); break;
+                case 'filter': optionsHTML = getFiltersHTML(); break;
+                case 'transform': optionsHTML = getTransformHTML(); break;
+                case 'crop': optionsHTML = getCropHTML(); break;
+            }
+            container.innerHTML = `<div class="p-4">${optionsHTML}</div>`;
+            container.classList.remove('hidden');
+
+            const height = container.scrollHeight + 'px';
+            container.style.height = '0px';
+
+            requestAnimationFrame(() => {
+                container.style.height = height;
+            });
+
+            switch (tool) {
+                case 'adjust': addAdjustmentsListeners(); break;
+                case 'filter': addFilterListeners(); break;
+                case 'transform': addTransformListeners(); break;
+                case 'crop': addCropListeners(); showCropBox(); break;
+            }
+        }
+
+        // --- Tool-specific functions ---
+        function getFilterCSS(filterName) { return filters[filterName] ? filters[filterName].css : ''; }
+        function getAdjustmentsHTML() { return `<div class="grid grid-cols-1 gap-4">${createSlider('brightness', 'Brightness', 0, 200, state.adjustments.brightness)}${createSlider('contrast', 'Contrast', 0, 200, state.adjustments.contrast)}${createSlider('saturation', 'Saturation', 0, 200, state.adjustments.saturation)}</div>`; }
+        function createSlider(id, label, min, max, value) { return `<div><label for="${id}-slider" class="block text-sm font-medium text-gray-300">${label}</label><input type="range" id="${id}-slider" min="${min}" max="${max}" value="${value}" class="w-full"></div>`; }
+        function addAdjustmentsListeners() { document.getElementById('brightness-slider').addEventListener('input', e => { state.adjustments.brightness = e.target.value; applyCanvasStyles(); }); document.getElementById('contrast-slider').addEventListener('input', e => { state.adjustments.contrast = e.target.value; applyCanvasStyles(); }); document.getElementById('saturation-slider').addEventListener('input', e => { state.adjustments.saturation = e.target.value; applyCanvasStyles(); }); }
+        function getFiltersHTML() { let previewsHTML = Object.keys(filters).map(key => `<div class="flex-shrink-0 text-center"><button data-filter="${key}" class="filter-btn w-20 h-20 bg-gray-700 rounded-md overflow-hidden focus:outline-none focus:ring-2 focus:ring-blue-500"><canvas id="preview-${key}" class="w-full h-full"></canvas></button><p class="text-xs mt-1">${filters[key].name}</p></div>`).join(''); return `<div class="filter-previews flex items-center space-x-4 overflow-x-auto">${previewsHTML}</div>`; }
+        function addFilterListeners() { const previewCanvasSize = 80; Object.keys(filters).forEach(key => { const previewCanvas = document.getElementById(`preview-${key}`); if (previewCanvas && state.currentImage) { const prevCtx = previewCanvas.getContext('2d'); previewCanvas.width = previewCanvasSize; previewCanvas.height = previewCanvasSize; prevCtx.filter = getFilterCSS(key); const hRatio = previewCanvas.width / state.currentImage.width, vRatio = previewCanvas.height / state.currentImage.height; const ratio  = Math.max(hRatio, vRatio); const centerShift_x = ( previewCanvas.width - state.currentImage.width*ratio ) / 2; const centerShift_y = ( previewCanvas.height - state.currentImage.height*ratio ) / 2; prevCtx.drawImage(state.currentImage, 0,0, state.currentImage.width, state.currentImage.height, centerShift_x,centerShift_y,state.currentImage.width*ratio, state.currentImage.height*ratio); } }); document.querySelectorAll('.filter-btn').forEach(btn => { btn.addEventListener('click', () => { state.activeFilter = btn.dataset.filter; applyCanvasStyles(); }); }); }
+        function getTransformHTML() { return `<div class="grid grid-cols-2 sm:grid-cols-4 gap-2">${createTransformButton('rotate-left', 'Rotate Left')}${createTransformButton('rotate-right', 'Rotate Right')}${createTransformButton('flip-h', 'Flip Horizontal')}${createTransformButton('flip-v', 'Flip Vertical')}</div>`; }
+        function createTransformButton(id, text) { return `<button id="${id}" class="bg-gray-700 p-2 rounded-md hover:bg-gray-600 text-sm">${text}</button>`; }
+        function addTransformListeners() { document.getElementById('rotate-left').addEventListener('click', () => { state.transform.rotation = (state.transform.rotation - 90) % 360; displayImage(); }); document.getElementById('rotate-right').addEventListener('click', () => { state.transform.rotation = (state.transform.rotation + 90) % 360; displayImage(); }); document.getElementById('flip-h').addEventListener('click', () => { state.transform.flipH *= -1; displayImage(); }); document.getElementById('flip-v').addEventListener('click', () => { state.transform.flipV *= -1; displayImage(); }); }
+        function getCropHTML() { return `<div class="flex justify-center items-center space-x-2"><button class="aspect-ratio-btn bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded text-sm" data-ratio="0">Free</button><button class="aspect-ratio-btn bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded text-sm" data-ratio="1">1:1</button><button class="aspect-ratio-btn bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded text-sm" data-ratio="1.333">4:3</button><button class="aspect-ratio-btn bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded text-sm" data-ratio="1.777">16:9</button><div class="flex-grow"></div><button id="cancel-crop" class="bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-sm">Cancel</button><button id="apply-crop" class="bg-green-600 hover:bg-green-700 px-3 py-1 rounded text-sm">Apply</button></div>`; }
+        function addCropListeners() { document.getElementById('cancel-crop').addEventListener('click', () => toggleTool({currentTarget: {dataset: {tool: 'crop'}}})); document.getElementById('apply-crop').addEventListener('click', applyCrop); document.querySelectorAll('.aspect-ratio-btn').forEach(btn => btn.addEventListener('click', setCropAspectRatio)); elements.cropBoxEl.addEventListener('mousedown', onCropStart); }
+        function showCropBox() { if (!state.currentImage) return; const canvasRect = elements.canvas.getBoundingClientRect(); const vpRect = elements.viewport.getBoundingClientRect(); state.crop.width = elements.canvas.width * 0.8; state.crop.height = elements.canvas.height * 0.8; state.crop.x = (canvasRect.width - state.crop.width) / 2 + (canvasRect.left - vpRect.left); state.crop.y = (canvasRect.height - state.crop.height) / 2 + (canvasRect.top - vpRect.top); elements.cropBoxEl.classList.remove('hidden'); updateCropBoxVisual(); }
+        function hideCropBox() { elements.cropBoxEl.classList.add('hidden'); }
+        function updateCropBoxVisual() { const { x, y, width, height } = state.crop; elements.cropBoxEl.style.transform = `translate(${x}px, ${y}px)`; elements.cropBoxEl.style.width = `${width}px`; elements.cropBoxEl.style.height = `${height}px`; }
+        function onCropStart(e) { e.preventDefault(); e.stopPropagation(); state.crop.active = true; state.crop.startX = e.clientX; state.crop.startY = e.clientY; state.crop.startBoxX = state.crop.x; state.crop.startBoxY = state.crop.y; state.crop.startWidth = state.crop.width; state.crop.startHeight = state.crop.height; state.crop.resizing = e.target.classList.contains('handle'); state.crop.handle = e.target.dataset.handle; document.addEventListener('mousemove', onCropMove); document.addEventListener('mouseup', onCropEnd); }
+        function onCropMove(e) { if (!state.crop.active) return; const dx = e.clientX - state.crop.startX; const dy = e.clientY - state.crop.startY; if (state.crop.resizing) { let { startWidth, startHeight, startBoxX, startBoxY, handle, aspectRatio } = state.crop; let newWidth = startWidth; let newHeight = startHeight; let newX = startBoxX; let newY = startBoxY; if (handle.includes('e')) { newWidth += dx; } if (handle.includes('w')) { newWidth -= dx; newX += dx; } if (handle.includes('s')) { newHeight += dy; } if (handle.includes('n')) { newHeight -= dy; newY += dy; } if (aspectRatio > 0) { if (handle.includes('e') || handle.includes('w')) { newHeight = newWidth / aspectRatio; } else { newWidth = newHeight * aspectRatio; } } if (newWidth > 20) { state.crop.width = newWidth; state.crop.x = newX; } if (newHeight > 20) { state.crop.height = newHeight; state.crop.y = newY; } } else { state.crop.x = state.crop.startBoxX + dx; state.crop.y = state.crop.startBoxY + dy; } updateCropBoxVisual(); }
+        function onCropEnd() { state.crop.active = false; document.removeEventListener('mousemove', onCropMove); document.removeEventListener('mouseup', onCropEnd); }
+        function setCropAspectRatio(e) { state.crop.aspectRatio = parseFloat(e.currentTarget.dataset.ratio); if (state.crop.aspectRatio > 0) { state.crop.height = state.crop.width / state.crop.aspectRatio; updateCropBoxVisual(); } }
+        function applyCrop() { const canvasRect = elements.canvas.getBoundingClientRect(); const vpRect = elements.viewport.getBoundingClientRect(); const scaleX = state.currentImage.width / elements.canvas.width; const scaleY = state.currentImage.height / elements.canvas.height; const cropX = (state.crop.x - (canvasRect.left - vpRect.left)) * scaleX; const cropY = (state.crop.y - (canvasRect.top - vpRect.top)) * scaleY; const cropWidth = state.crop.width * scaleX; const cropHeight = state.crop.height * scaleY; const tempCanvas = document.createElement('canvas'); tempCanvas.width = cropWidth; tempCanvas.height = cropHeight; tempCanvas.getContext('2d').drawImage(state.currentImage, cropX, cropY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight); const newImage = new Image(); newImage.onload = () => { state.currentImage = newImage; state.originalImage = newImage; resetAllState(); toggleTool({currentTarget: {dataset: {tool: 'crop'}}}); displayImage(); }; newImage.src = tempCanvas.toDataURL(); }
+        function exportImage() { if (!state.currentImage) return; const tempCanvas = document.createElement('canvas'); const tempCtx = tempCanvas.getContext('2d'); const { rotation, flipH, flipV } = state.transform; const rotated = rotation % 180 !== 0; tempCanvas.width = rotated ? state.currentImage.height : state.currentImage.width; tempCanvas.height = rotated ? state.currentImage.width : state.currentImage.height; const { brightness, contrast, saturation } = state.adjustments; tempCtx.filter = `brightness(${brightness}%) contrast(${contrast}%) saturate(${saturation}%) ${getFilterCSS(state.activeFilter)}`.trim(); tempCtx.translate(tempCanvas.width / 2, tempCanvas.height / 2); tempCtx.rotate(rotation * Math.PI / 180); tempCtx.scale(flipH, flipV); tempCtx.drawImage(state.currentImage, -state.currentImage.width / 2, -state.currentImage.height / 2); const link = document.createElement('a'); link.download = 'pintura-export.png'; link.href = tempCanvas.toDataURL('image/png'); link.click(); }
+
+        init();
+    });
+    </script>
+</body>
+</html>
